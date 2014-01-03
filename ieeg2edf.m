@@ -1,18 +1,26 @@
 function ieeg2edf(dataset, range, varargin)
-  %IEEG2EDF  Downloads data from IEEG-Portal to EDF format.
-  %
-  %  IEEG2EDF(dataset,range) saves the data in the dataset IEEGDATASET
-  %  object to edf. the range is a vector of 1x2 with the start and
+  %IEEG2EDF  Stores data from IEEG-Portal as an EDF file.
+  %  IEEG2EDF(OBJ, RANGE) saves the data in the dataset IEEGDATASET
+  %  object to edf. RANGE is a vector of 1x2 with the start and
   %  end-index that should be saved to EDF.
   %
   %  IEEG2EDF(dataset,range,'filePath') same as above but with supplied
   %  EDF path.
   %
-  %     example:
+  %     Example:
   %         >> session = IEEGSession('Study 005', 'username', 'pwdFile');
   %         >> ieeg2edf(session.data, [1 100000]);   
   %
+  %  Note that this method is currently has limited features and does not
+  %  include a lot of meta-information or annotations/events in the EDF
+  %  file. 
   %
+  %  Also note that the method only writes integer number of seconds to an
+  %  EDF file and that the last partial second of the requested data is
+  %  omitted.
+  %
+  %  Exerps of the EDFWrite method originate from the Mathworks File
+  %  Echange; the corresponding license is included in the writeEDF method.
   
   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   % Copyright 2013 Trustees of the University of Pennsylvania
@@ -36,10 +44,10 @@ function ieeg2edf(dataset, range, varargin)
   else
     [fileName, pathName, ~] = uiputfile('*.edf', ...
           'Select a location to save the EDF file','newFile.edf');
-    fileName = fullfile(pathName,fileName);    
+    fileName = fullfile(pathName, fileName);    
   end
   
-  % pre-alloc array.
+  % Create Meta-Structure
   nrChannels = length(dataset.channels);
   metaStruct = struct(...
     'channels',[], ...
@@ -47,7 +55,7 @@ function ieeg2edf(dataset, range, varargin)
     'numchannels', nrChannels);
   metaStruct.channels = {dataset.channels.label};
   
-  BLOCKSIZE = 5000; % Request 10000 samples per iteration (arbitrary)
+  BLOCKSIZE = 10000; % Request 10000 samples per iteration (arbitrary)
   nblocks = max([1 ceil(diff(range)./BLOCKSIZE)]);
   
   % Populate array with data.
@@ -56,12 +64,13 @@ function ieeg2edf(dataset, range, varargin)
   try
     for iBlock = 1: nblocks
       display(sprintf('Saving block: %i',iBlock));
-      idx = startIdx:(startIdx + BLOCKSIZE);
+      idx = startIdx:(startIdx + BLOCKSIZE-1);
       data = dataset.getvalues(idx, 1:nrChannels);     
       writeEDF(fileName, data', metaStruct, firstCall);
       firstCall = false;
       startIdx = idx(end)+1;
     end
+
   catch ME
     rethrow(ME)
   end
@@ -103,11 +112,11 @@ function writeEDF(filename, data, header, firstCall)
   persistent streamBuffer
   
   samplesPerRecord = floor(header.samplingrate);
-  
-  [nChans,N] = size(data);
+  [nChans, ~] = size(data);
 
+  % -- -- -- SAVE HEADER -- -- --
   if firstCall
-    streamBuffer = []; %#ok<NASGU>
+    streamBuffer = []; 
         
     % Create Labels
     labels = char(32*ones(nChans, 16));
@@ -138,54 +147,6 @@ function writeEDF(filename, data, header, firstCall)
 
     if ~isa(data,'int16')
       data = int16(data);
-    end
-    
-    % Find integer number of Records in data.
-    nrRecords = floor(size(data,2)./samplesPerRecord);
-    toBuffer = size(data,2)- (nrRecords * samplesPerRecord);
-    streamBuffer = data(:, end-toBuffer+1:end);
-    data = data(:,1 : (end-toBuffer));
-    
-    % Create events channel
-    if isfield(header,'events')
-        minV(end+1,1) = -32768;
-        maxV(end+1,1) = 32767;
-        minVc(end+1,1) = -32768;
-        maxVc(end+1,1) = 32767;
-        recordstmp = zeros(1,ceil(N/header.samplingrate));
-        eventchannel =repmat(uint8(00),120,ceil(N/header.samplingrate));
-        for i = 1:ceil(N/header.samplingrate)
-            tmp = unicode2native(num2str(i-1));
-            tmp = [43 tmp 20 20 00]; %#ok<AGROW>
-            eventchannel(1:length(tmp),i) = tmp';
-            recordstmp(1,i) = length(tmp);
-        end
-        clearvars tmp
-        for i = 1:size(header.events.POS,2);
-            tmpPOS = unicode2native(num2str(round(1000* header.events.POS(1,i) / header.samplingrate) / 1000));
-            tmpDUR = unicode2native(num2str(round(1000* header.events.DUR(1,i) / header.samplingrate) / 1000));
-            tmpTYP = unicode2native(header.events.TYP{1,i});
-            eventchanneltmp = [43 tmpPOS 21 tmpDUR 20 tmpTYP 20 00];
-            j = ceil(header.events.POS(1,i) / header.samplingrate);
-            eventchannel(recordstmp(1,j)+1:recordstmp(1,j) + length(eventchanneltmp),j) = eventchanneltmp';
-            recordstmp(1,j) =  recordstmp(1,j) + length(eventchanneltmp);
-        end
-        clearvars tmpPOS tmpDUR tmpTYP eventchanneltmp
-        lengthevents = size(eventchannel,1) / 2;
-        if ceil(size(eventchannel,1) / 2) > (size(eventchannel,1) / 2)
-            eventchannel = cat(1,eventchannel,repmat(uint8(00),1,ceil(N/header.samplingrate)));
-        end
-        eventchannel = reshape(eventchannel,1,size(eventchannel,1)*size(eventchannel,2));
-        eventchannel = typecast(eventchannel','int16')';
-        eventchannel = reshape(eventchannel,lengthevents,length(eventchannel)/lengthevents);
-        data = reshape(data,size(data,1),samplesPerRecord,nrRecords);
-        data = permute(data,[2 1 3]);
-        data = reshape(data,size(data,1) * size(data,2),size(data,3));
-        data = cat(1,data,eventchannel);
-    else
-        data = reshape(data, size(data, 1), samplesPerRecord, nrRecords);
-        data = permute(data,[2 1 3]);
-        data = reshape(data,size(data,1) * size(data,2),size(data,3));
     end
 
     %Convert digMin digMax physMin physMax to char-array
@@ -253,12 +214,9 @@ function writeEDF(filename, data, header, firstCall)
     fprintf(fid, '%02i.%02i.%02i', header.hour, header.minute, 0); % time as hh.mm.ss
 
     fprintf(fid, '%-8i', 256*(1+nChans));  % number of bytes in header
-    if isfield(header,'events')
-        fprintf(fid, '%-44s', 'EDF+C'); % reserved (44 spaces)
-    else
-        fprintf(fid, '%44s', ' '); % reserved (44 spaces)
-    end
-    fprintf(fid, '%-8i', ceil(N/header.samplingrate));  % number of EEG records
+    fprintf(fid, '%44s', ' '); % reserved (44 spaces)
+    
+    fprintf(fid, '%-8i', 0);  % number of EEG records
     fprintf(fid, '%8f', 1/header.samplingrate * samplesPerRecord);  % duration of EEG record (=Fs)
     fprintf(fid, '%-4i', nChans);  % number of signals = channels
 
@@ -270,56 +228,50 @@ function writeEDF(filename, data, header, firstCall)
     fwrite(fid, digMin', 'char*1'); % digital minimum
     fwrite(fid, digMax', 'char*1'); % digital maximum
     fwrite(fid, 32*ones(80,nChans), 'uint8'); % prefiltering (all spaces)
-    if isfield(header,'events')
-        for k=1:(nChans-1)
-            fprintf(fid, '%-8i', samplesPerRecord); % samples per record 
-        end
-        fprintf(fid, '%-8i', lengthevents); % samples for annotations per record
-    else
-        for k=1:nChans
-            fprintf(fid, '%-8i', samplesPerRecord); % samples per record 
-        end
+
+    for k=1:nChans
+        fprintf(fid, '%-8i', samplesPerRecord); % samples per record 
     end
+    
     fwrite(fid, 32*ones(32,nChans), 'uint8'); % reserverd (32 spaces / channel)
-    fwrite(fid, data, 'int16');
-    fclose(fid);
-  else
-    
-    % Reformat data
-    if ~isa(data,'int16')
-      data = int16(data);
-    end
-        
-    % concatenate Buffer from previous iteration with new data
-    data  = [streamBuffer data];
-    
-    % Find integer number of Records in data.
-    nrRecords = floor(size(data,2)./samplesPerRecord);
-    toBuffer = size(data,2)- (nrRecords * samplesPerRecord);
-    streamBuffer = data(:, end-toBuffer+1:end);
-    data = data(:,1 : (end-toBuffer));
-    
-    data = reshape(data,size(data,1),samplesPerRecord, nrRecords);
-    data = permute(data,[2 1 3]);
-    data = reshape(data,size(data,1) * size(data,2),size(data,3));
-    
-    % Not the first call, assert file exists and append data to file.
-    fid = fopen(filename, 'r+', 'ieee-le');
-    
-    %Adding data to end of file    
-    fseek(fid,0,'eof');
-    fwrite(fid, data, 'int16');
-    
-    %Updating header with new number of records in file.
-    fseek(fid,236,-1);
-    curNrRecords = str2double(fread(fid, 8,'*char'));
-    newNrRecords = curNrRecords + nrRecords;
-    newNrRecordsStr = sprintf('%-8i',newNrRecords);
-    fseek(fid,236,-1);
-    fwrite(fid, newNrRecordsStr,'char*1');
-    
-    fclose(fid);
+    fclose(fid);    
   end
+  % -- -- -- -- -- --
   
+  % -- -- -- SAVE DATA -- -- --
+  if ~isa(data,'int16')
+    data = int16(data);
+  end
+    
+  % concatenate Buffer from previous iteration with new data
+  data  = [streamBuffer data];
+
+  % Find integer number of Records in data.
+  nrRecords = floor(size(data,2)./samplesPerRecord);
+  toBuffer = size(data , 2)- (nrRecords * samplesPerRecord);
+  streamBuffer = data(:, end-toBuffer+1:end);
+  data = data(:, 1 : (end-toBuffer));
+
+  data = reshape(data,size(data,1),samplesPerRecord, nrRecords);
+  data = permute(data,[2 1 3]);
+  data = reshape(data,size(data,1) * size(data,2),size(data,3));
+
+  % Not the first call, assert file exists and append data to file.
+  fid = fopen(filename, 'r+', 'ieee-le');
+
+  %Adding data to end of file    
+  fseek(fid,0,'eof');
+  fwrite(fid, data, 'int16');
+
+  %Updating header with new number of records in file.
+  fseek(fid,236,-1);
+  curNrRecords = str2double(fread(fid, 8,'*char'));
+  newNrRecords = curNrRecords + nrRecords;
+  newNrRecordsStr = sprintf('%-8i',newNrRecords);
+  fseek(fid,236,-1);
+  fwrite(fid, newNrRecordsStr,'char*1');
+
+  fclose(fid);
+  % -- -- -- -- -- --
 
 end
